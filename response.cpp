@@ -302,8 +302,8 @@ private:
         
         // Check direct matches first
         // Check direct matches first - use init-statement for both variables
-        if (const bool is_common_password = common_pw_.contains(lower);
-            const bool is_dictionary_word = dict_.contains(lower);
+        if (const bool is_common_password = common_pw_.contains(lowercase_password);
+            const bool is_dictionary_word = dict_.contains(lowercase_password);
             is_common_password || is_dictionary_word) {
 
             return 0.2; // 80% penalty
@@ -312,7 +312,7 @@ private:
         // Check substring matches
         for(const auto& w: dict_) {
             if (const bool word_long_enough = w.length() >= 4;
-                const bool contains_word = lower.contains(w);
+                const bool contains_word = lowercase_password.contains(w);
                 word_long_enough && contains_word) {
 
                     return 0.6; // 40% penalty
