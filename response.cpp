@@ -301,20 +301,21 @@ private:
         }) | std::ranges::to<std::string>()};
         
         // Check direct matches first
-        const bool is_common_password = common_passwords_.contains(lowercase_password);
-        const bool is_dictionary_word = dictionary_words_.contains(lowercase_password);
-        
-        if (is_common_password || is_dictionary_word) {
+        // Check direct matches first - use init-statement for both variables
+        if (const bool is_common_password = common_pw_.contains(lower);
+            const bool is_dictionary_word = dict_.contains(lower);
+            is_common_password || is_dictionary_word) {
+
             return 0.2; // 80% penalty
         }
         
         // Check substring matches
-        for (const auto& word : dictionary_words_) {
-            const bool word_long_enough = word.length() >= 4;
-            const bool contains_word = lowercase_password.contains(word);
-            
-            if (word_long_enough && contains_word) {
-                return 0.6; // 40% penalty
+        for(const auto& w: dict_) {
+            if (const bool word_long_enough = w.length() >= 4;
+                const bool contains_word = lower.contains(w);
+                word_long_enough && contains_word) {
+
+                    return 0.6; // 40% penalty
             }
         }
         
