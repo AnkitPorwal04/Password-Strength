@@ -302,9 +302,8 @@ private:
         
         // Check direct matches first
         const bool is_common_password = common_passwords_.contains(lowercase_password);
-        const bool is_dictionary_word = dictionary_words_.contains(lowercase_password);
-        
-        if (is_common_password || is_dictionary_word) {
+        if (const bool is_dictionary_word = dictionary_words_.contains(lowercase_password);
+        is_common_password || is_dictionary_word) {
             return 0.2; // 80% penalty
         }
         
