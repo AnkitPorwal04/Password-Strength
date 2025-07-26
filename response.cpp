@@ -4,12 +4,16 @@
 #include <cmath>
 #include <expected>
 #include <format>
+#include <functional>
+#include <print>
 #include <ranges>
 #include <regex>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace security::password {
@@ -23,6 +27,26 @@ enum class StrengthLevel : std::uint8_t {
     VERY_STRONG = 5
 };
 
+// Custom transparent hasher for heterogeneous string lookups
+struct TransparentStringHasher {
+    using is_transparent = void;
+    
+    [[nodiscard]] auto operator()(std::string_view sv) const noexcept -> std::size_t {
+        return std::hash<std::string_view>{}(sv);
+    }
+    
+    [[nodiscard]] auto operator()(const std::string& s) const noexcept -> std::size_t {
+        return std::hash<std::string>{}(s);
+    }
+    
+    [[nodiscard]] auto operator()(const char* s) const noexcept -> std::size_t {
+        return std::hash<std::string_view>{}(std::string_view{s});
+    }
+};
+
+// Transparent string container aliases
+using TransparentStringSet = std::unordered_set<std::string, TransparentStringHasher, std::equal_to<>>;
+
 struct AnalysisResult final {
     StrengthLevel level{StrengthLevel::VERY_WEAK};
     double entropy_bits{0.0};
@@ -32,16 +56,22 @@ struct AnalysisResult final {
     std::uint8_t nist_score{0};
     
     [[nodiscard]] constexpr auto strength_name() const noexcept -> std::string_view {
-        constexpr std::array names{"Very Weak", "Weak", "Fair", "Good", "Strong", "Very Strong"};
-        return names[static_cast<std::size_t>(level)];
+        constexpr std::array names{
+            "Very Weak", "Weak", "Fair", "Good", "Strong", "Very Strong"
+        };
+        const auto index = std::to_underlying(level);
+        return names[static_cast<std::size_t>(index)];
     }
     
     [[nodiscard]] auto to_json() const -> std::string {
         auto format_array = [](const auto& arr) {
             return arr | std::views::transform([](const auto& item) {
-                return std::format("\"{}\"", item);
+                return std::format(R"("{}")", item);
             }) | std::views::join_with(std::string_view{", "}) | std::ranges::to<std::string>();
         };
+        
+        const auto level_int = std::to_underlying(level);
+        const auto years = crack_time_seconds / (365.25 * 24 * 3600);
         
         return std::format(R"({{
     "level": {},
@@ -53,9 +83,8 @@ struct AnalysisResult final {
     "suggestions": [{}],
     "nist_score": {}
 }})", 
-            static_cast<int>(level), strength_name(), entropy_bits, crack_time_seconds,
-            crack_time_seconds / (365.25 * 24 * 3600), format_array(vulnerabilities), 
-            format_array(suggestions), nist_score);
+            static_cast<int>(level_int), strength_name(), entropy_bits, crack_time_seconds,
+            years, format_array(vulnerabilities), format_array(suggestions), nist_score);
     }
 };
 
@@ -70,13 +99,13 @@ private:
     static constexpr double GPU_HASHES_PER_SECOND{1e11};
     static constexpr std::array<double, 5> ENTROPY_THRESHOLDS{28.0, 35.0, 50.0, 65.0, 80.0};
     static constexpr std::array<std::string_view, 3> KEYBOARD_LAYOUTS{
-        "qwertyuiopasdfghjklzxcvbnm",
-        "1234567890",
-        "`-=[]\\;',./~!@#$%^&*()_+{}|:\"<>?"
+        R"(qwertyuiopasdfghjklzxcvbnm)",
+        R"(1234567890)",
+        R"(`-=[]\\;',./~!@#$%^&*()_+{}|:"<>?)"
     };
     
-    std::unordered_set<std::string> common_passwords_;
-    std::unordered_set<std::string> dictionary_words_;
+    TransparentStringSet common_passwords_;
+    TransparentStringSet dictionary_words_;
 
 public:
     explicit PasswordStrengthEstimator() {
@@ -117,7 +146,7 @@ public:
 
 private:
     void initialize_security_dictionaries() noexcept {
-        common_passwords_ = {
+        common_passwords_ = TransparentStringSet{
             "password", "123456", "123456789", "guest", "qwerty", "12345678", "111111",
             "12345", "col123456", "123123", "1234567", "1234", "1234567890", "000000",
             "555555", "666666", "123321", "654321", "7777777", "123", "password1",
@@ -125,7 +154,7 @@ private:
             "asdasd", "a123456", "123456q", "admin", "welcome", "monkey", "dragon"
         };
         
-        dictionary_words_ = {
+        dictionary_words_ = TransparentStringSet{
             "password", "welcome", "monkey", "dragon", "master", "freedom", "whatever",
             "jordan", "secret", "summer", "flower", "shadow", "champion", "princess",
             "orange", "starwars", "computer", "michelle", "maggie", "jessica", "love",
@@ -160,14 +189,24 @@ private:
         } classes;
         
         for (const char c : password) {
-            if (c >= 'a' && c <= 'z') classes.lowercase = true;
-            else if (c >= 'A' && c <= 'Z') classes.uppercase = true;
-            else if (c >= '0' && c <= '9') classes.digits = true;
-            else classes.special = true;
+            if (c >= 'a' && c <= 'z') {
+                classes.lowercase = true;
+            } else if (c >= 'A' && c <= 'Z') {
+                classes.uppercase = true;
+            } else if (c >= '0' && c <= '9') {
+                classes.digits = true;
+            } else {
+                classes.special = true;
+            }
         }
         
-        return (classes.lowercase ? 26 : 0) + (classes.uppercase ? 26 : 0) + 
-               (classes.digits ? 10 : 0) + (classes.special ? 32 : 0);
+        int size = 0;
+        if (classes.lowercase) size += 26;
+        if (classes.uppercase) size += 26;
+        if (classes.digits) size += 10;
+        if (classes.special) size += 32;
+        
+        return std::max(1, size);
     }
     
     /**
@@ -189,23 +228,29 @@ private:
                 const auto prev_pos{layout.find(std::tolower(password[i-1]))};
                 const auto curr_pos{layout.find(std::tolower(password[i]))};
                 
-                if (prev_pos != std::string_view::npos && curr_pos != std::string_view::npos &&
-                    std::abs(static_cast<int>(curr_pos - prev_pos)) <= 1) {
-                    ++current_walk;
+                if (prev_pos != std::string_view::npos && curr_pos != std::string_view::npos) {
+                    const auto pos_diff = static_cast<int>(curr_pos - prev_pos);
+                    if (std::abs(pos_diff) <= 1) {
+                        ++current_walk;
+                    } else {
+                        max_walk_length = std::max(max_walk_length, current_walk);
+                        current_walk = 1;
+                    }
                 } else {
                     max_walk_length = std::max(max_walk_length, current_walk);
                     current_walk = 1;
                 }
             }
             max_walk_length = std::max(max_walk_length, current_walk);
-            keyboard_walk_penalty = std::max(keyboard_walk_penalty, 
-                static_cast<double>(max_walk_length) / password.length());
+            const auto walk_ratio = static_cast<double>(max_walk_length) / password.length();
+            keyboard_walk_penalty = std::max(keyboard_walk_penalty, walk_ratio);
         }
         
         // Detect sequential patterns
         for (std::size_t i{2}; i < password.length(); ++i) {
-            if (std::abs(password[i] - password[i-1]) == 1 && 
-                std::abs(password[i-1] - password[i-2]) == 1) {
+            const auto diff1 = std::abs(password[i] - password[i-1]);
+            const auto diff2 = std::abs(password[i-1] - password[i-2]);
+            if (diff1 == 1 && diff2 == 1) {
                 sequential_penalty += 0.1;
             }
         }
@@ -232,7 +277,7 @@ private:
             return static_cast<char>(std::tolower(c)); 
         }) | std::ranges::to<std::string>()};
         
-        // Direct match penalty
+        // Direct match penalty using transparent lookup
         if (common_passwords_.contains(lowercase_password) || 
             dictionary_words_.contains(lowercase_password)) {
             return 0.2; // 80% penalty
@@ -258,7 +303,7 @@ private:
             result.vulnerabilities.emplace_back("Password too short (minimum 8 characters required)");
         }
         
-        if (common_passwords_.contains(std::string{password})) {
+        if (common_passwords_.contains(password)) {
             result.vulnerabilities.emplace_back("Password found in common breach databases");
         }
         
@@ -330,11 +375,12 @@ private:
         if (contains_digits(password)) score += 10;
         if (contains_special_characters(password)) score += 10;
         
-        // Security checks
-        if (!common_passwords_.contains(std::string{password})) score += 10;
+        // Security checks using transparent lookup
+        if (!common_passwords_.contains(password)) score += 10;
         
         // Vulnerability penalties
-        score -= static_cast<int>(result.vulnerabilities.size() * 3);
+        const auto vulnerability_count = static_cast<int>(result.vulnerabilities.size());
+        score -= vulnerability_count * 3;
         
         return static_cast<std::uint8_t>(std::clamp(score, 0, 100));
     }
@@ -343,7 +389,8 @@ private:
         const auto threshold_index{std::ranges::find_if(ENTROPY_THRESHOLDS, 
             [entropy_bits](double threshold) { return entropy_bits < threshold; }) - ENTROPY_THRESHOLDS.begin()};
         
-        return static_cast<StrengthLevel>(threshold_index);
+        const auto level_value = std::to_underlying(StrengthLevel{});
+        return static_cast<StrengthLevel>(static_cast<std::uint8_t>(threshold_index + level_value));
     }
     
     [[nodiscard]] constexpr auto contains_mixed_case(std::string_view password) const noexcept -> bool {
@@ -367,12 +414,11 @@ private:
                                 const AnalysisResult& result) const noexcept {
         const auto end_time{std::chrono::high_resolution_clock::now()};
         const auto duration{std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time)};
+        const auto level_int = std::to_underlying(result.level);
         
-        // Performance logging for production monitoring
-        std::format_to(std::back_inserter(std::string{}), 
-            "[PERF] Length:{} Time:{}μs Entropy:{:.1f} Level:{}\n",
-            password_length, duration.count(), result.entropy_bits, 
-            static_cast<int>(result.level));
+        std::println("[PERF] Length:{} Time:{}μs Entropy:{:.1f} Level:{}",
+                    password_length, duration.count(), result.entropy_bits, 
+                    static_cast<int>(level_int));
     }
 };
 
@@ -397,13 +443,15 @@ auto main() -> int {
     std::println("=== Password Security Analysis Results ===\n");
     
     for (const auto& [password, description] : test_cases) {
-        if (const auto result{estimator.analyze_password(password)}; result.has_value()) {
+        const auto result{estimator.analyze_password(password)};
+        
+        if (result.has_value()) {
             std::println("Test: {}", description);
             std::println("Password: {}", password);
             std::println("Analysis: {}", result->to_json());
+            const auto years = result->crack_time_seconds / (365.25 * 24 * 3600);
             std::println("Estimated crack time: {:.2e} seconds ({:.2f} years)", 
-                        result->crack_time_seconds, 
-                        result->crack_time_seconds / (365.25 * 24 * 3600));
+                        result->crack_time_seconds, years);
             std::println("{}\n", std::string(80, '-'));
         } else {
             std::println("Analysis failed for '{}': {}\n", password, result.error());
