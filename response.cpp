@@ -223,10 +223,10 @@ private:
             const auto prev_pos{layout.find(prev_char)};
             const auto curr_pos{layout.find(curr_char)};
             
-            const bool positions_valid = (prev_pos != std::string_view::npos) && 
-                                       (curr_pos != std::string_view::npos);
-            
-            if (!positions_valid) {
+           if (const bool positions_valid = (prev_pos != std::string_view::npos) && 
+                                (curr_pos != std::string_view::npos); 
+            !positions_valid) {
+
                 max_walk_length = std::max(max_walk_length, current_walk);
                 current_walk = 1;
                 continue;
