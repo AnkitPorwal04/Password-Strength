@@ -170,7 +170,8 @@ private:
      */
     [[nodiscard]] auto calculate_effective_entropy(std::string_view password) const noexcept -> double {
         const auto charset_size{determine_character_space_size(password)};
-        const auto base_entropy{static_cast<double>(password.length()) * std::log2(charset_size)};
+        const auto password_length = static_cast<double>(password.length());
+        const auto base_entropy{password_length * std::log2(charset_size)};
         
         const auto pattern_penalty{calculate_pattern_penalty_factor(password)};
         const auto repetition_penalty{calculate_repetition_penalty_factor(password)};
@@ -180,96 +181,118 @@ private:
         return std::max(0.0, effective_entropy);
     }
     
-    [[nodiscard]] constexpr auto determine_character_space_size(std::string_view password) const noexcept -> int {
-        struct CharacterClasses {
-            bool lowercase{false};
-            bool uppercase{false}; 
-            bool digits{false};
-            bool special{false};
-        } classes;
+    [[nodiscard]] auto determine_character_space_size(std::string_view password) const noexcept -> int {
+        bool has_lowercase{false};
+        bool has_uppercase{false};
+        bool has_digits{false};
+        bool has_special{false};
         
         for (const char c : password) {
-            if (c >= 'a' && c <= 'z') {
-                classes.lowercase = true;
-            } else if (c >= 'A' && c <= 'Z') {
-                classes.uppercase = true;
-            } else if (c >= '0' && c <= '9') {
-                classes.digits = true;
-            } else {
-                classes.special = true;
-            }
+            has_lowercase = has_lowercase || (c >= 'a' && c <= 'z');
+            has_uppercase = has_uppercase || (c >= 'A' && c <= 'Z');
+            has_digits = has_digits || (c >= '0' && c <= '9');
+            has_special = has_special || !(std::isalnum(c));
         }
         
         int size = 0;
-        if (classes.lowercase) size += 26;
-        if (classes.uppercase) size += 26;
-        if (classes.digits) size += 10;
-        if (classes.special) size += 32;
+        size += has_lowercase ? 26 : 0;
+        size += has_uppercase ? 26 : 0;
+        size += has_digits ? 10 : 0;
+        size += has_special ? 32 : 0;
         
         return std::max(1, size);
     }
     
     /**
+     * Extract keyboard walk detection logic to reduce nesting
+     * @intuition Separate concerns for better maintainability
+     * @approach Individual pattern detection with early returns
+     * @complexity Time: O(n), Space: O(1)
+     */
+    [[nodiscard]] auto detect_keyboard_walk_in_layout(std::string_view password, 
+                                                     std::string_view layout) const noexcept -> double {
+        if (password.length() < 2) return 0.0;
+        
+        int max_walk_length{1};
+        int current_walk{1};
+        
+        for (std::size_t i{1}; i < password.length(); ++i) {
+            const auto prev_char = std::tolower(password[i-1]);
+            const auto curr_char = std::tolower(password[i]);
+            
+            const auto prev_pos{layout.find(prev_char)};
+            const auto curr_pos{layout.find(curr_char)};
+            
+            const bool positions_valid = (prev_pos != std::string_view::npos) && 
+                                       (curr_pos != std::string_view::npos);
+            
+            if (!positions_valid) {
+                max_walk_length = std::max(max_walk_length, current_walk);
+                current_walk = 1;
+                continue;
+            }
+            
+            const auto pos_diff = static_cast<int>(curr_pos - prev_pos);
+            const bool is_adjacent = std::abs(pos_diff) <= 1;
+            
+            if (is_adjacent) {
+                ++current_walk;
+            } else {
+                max_walk_length = std::max(max_walk_length, current_walk);
+                current_walk = 1;
+            }
+        }
+        
+        max_walk_length = std::max(max_walk_length, current_walk);
+        return static_cast<double>(max_walk_length) / password.length();
+    }
+    
+    /**
      * Detect keyboard walking patterns and sequential character sequences
      * @intuition Users often follow predictable keyboard patterns reducing effective entropy
-     * @approach Sliding window analysis across multiple keyboard layouts for pattern detection
+     * @approach Delegated pattern detection to reduce nesting complexity
      * @complexity Time: O(n * k) where k=keyboard layouts, Space: O(1)
      */
     [[nodiscard]] auto calculate_pattern_penalty_factor(std::string_view password) const noexcept -> double {
         auto keyboard_walk_penalty{0.0};
-        auto sequential_penalty{0.0};
         
-        // Detect keyboard walks
+        // Detect keyboard walks across all layouts
         for (const auto& layout : KEYBOARD_LAYOUTS) {
-            int max_walk_length{1};
-            int current_walk{1};
-            
-            for (std::size_t i{1}; i < password.length(); ++i) {
-                const auto prev_pos{layout.find(std::tolower(password[i-1]))};
-                const auto curr_pos{layout.find(std::tolower(password[i]))};
-                
-                if (prev_pos != std::string_view::npos && curr_pos != std::string_view::npos) {
-                    const auto pos_diff = static_cast<int>(curr_pos - prev_pos);
-                    if (std::abs(pos_diff) <= 1) {
-                        ++current_walk;
-                    } else {
-                        max_walk_length = std::max(max_walk_length, current_walk);
-                        current_walk = 1;
-                    }
-                } else {
-                    max_walk_length = std::max(max_walk_length, current_walk);
-                    current_walk = 1;
-                }
-            }
-            max_walk_length = std::max(max_walk_length, current_walk);
-            const auto walk_ratio = static_cast<double>(max_walk_length) / password.length();
+            const auto walk_ratio = detect_keyboard_walk_in_layout(password, layout);
             keyboard_walk_penalty = std::max(keyboard_walk_penalty, walk_ratio);
         }
         
         // Detect sequential patterns
+        auto sequential_penalty{0.0};
         for (std::size_t i{2}; i < password.length(); ++i) {
-            const auto diff1 = std::abs(password[i] - password[i-1]);
-            const auto diff2 = std::abs(password[i-1] - password[i-2]);
-            if (diff1 == 1 && diff2 == 1) {
+            const auto char_diff_1 = std::abs(password[i] - password[i-1]);
+            const auto char_diff_2 = std::abs(password[i-1] - password[i-2]);
+            
+            const bool is_sequential = (char_diff_1 == 1) && (char_diff_2 == 1);
+            if (is_sequential) {
                 sequential_penalty += 0.1;
             }
         }
         
-        const auto total_penalty{std::min(0.7, keyboard_walk_penalty * 0.5 + 
-                                         std::min(sequential_penalty, 0.4))};
+        const auto clamped_sequential = std::min(sequential_penalty, 0.4);
+        const auto total_penalty = std::min(0.7, keyboard_walk_penalty * 0.5 + clamped_sequential);
         return 1.0 - total_penalty;
     }
     
     [[nodiscard]] auto calculate_repetition_penalty_factor(std::string_view password) const noexcept -> double {
         std::unordered_map<char, int> char_frequency;
+        
         for (const char c : password) {
             ++char_frequency[c];
         }
         
         const auto max_repetition{std::ranges::max(char_frequency | std::views::values)};
-        const auto repetition_ratio{static_cast<double>(max_repetition) / password.length()};
         
-        return max_repetition > 2 ? 1.0 - (repetition_ratio * 0.6) : 1.0;
+        if (max_repetition <= 2) return 1.0;
+        
+        const auto password_length = static_cast<double>(password.length());
+        const auto repetition_ratio{static_cast<double>(max_repetition) / password_length};
+        return 1.0 - (repetition_ratio * 0.6);
     }
     
     [[nodiscard]] auto calculate_dictionary_penalty_factor(std::string_view password) const noexcept -> double {
@@ -277,15 +300,20 @@ private:
             return static_cast<char>(std::tolower(c)); 
         }) | std::ranges::to<std::string>()};
         
-        // Direct match penalty using transparent lookup
-        if (common_passwords_.contains(lowercase_password) || 
-            dictionary_words_.contains(lowercase_password)) {
+        // Check direct matches first
+        const bool is_common_password = common_passwords_.contains(lowercase_password);
+        const bool is_dictionary_word = dictionary_words_.contains(lowercase_password);
+        
+        if (is_common_password || is_dictionary_word) {
             return 0.2; // 80% penalty
         }
         
-        // Substring match penalty
+        // Check substring matches
         for (const auto& word : dictionary_words_) {
-            if (word.length() >= 4 && lowercase_password.contains(word)) {
+            const bool word_long_enough = word.length() >= 4;
+            const bool contains_word = lowercase_password.contains(word);
+            
+            if (word_long_enough && contains_word) {
                 return 0.6; // 40% penalty
             }
         }
@@ -299,7 +327,9 @@ private:
     }
     
     void analyze_security_vulnerabilities(std::string_view password, AnalysisResult& result) const {
-        if (password.length() < 8) {
+        const auto password_length = password.length();
+        
+        if (password_length < 8) {
             result.vulnerabilities.emplace_back("Password too short (minimum 8 characters required)");
         }
         
@@ -319,17 +349,21 @@ private:
             result.vulnerabilities.emplace_back("No special characters included");
         }
         
-        if (calculate_pattern_penalty_factor(password) < 0.7) {
+        const auto pattern_factor = calculate_pattern_penalty_factor(password);
+        if (pattern_factor < 0.7) {
             result.vulnerabilities.emplace_back("Contains predictable keyboard patterns");
         }
         
-        if (calculate_repetition_penalty_factor(password) < 0.7) {
+        const auto repetition_factor = calculate_repetition_penalty_factor(password);
+        if (repetition_factor < 0.7) {
             result.vulnerabilities.emplace_back("Excessive character repetition detected");
         }
     }
     
     void generate_improvement_suggestions(std::string_view password, AnalysisResult& result) const {
-        if (password.length() < 12) {
+        const auto password_length = password.length();
+        
+        if (password_length < 12) {
             result.suggestions.emplace_back("Increase length to at least 12 characters");
         }
         
@@ -345,7 +379,8 @@ private:
             result.suggestions.emplace_back("Add special characters (!@#$%^&*)");
         }
         
-        if (result.vulnerabilities.size() > 2) {
+        const auto vulnerability_count = result.vulnerabilities.size();
+        if (vulnerability_count > 2) {
             result.suggestions.emplace_back("Consider using randomly generated passphrases");
             result.suggestions.emplace_back("Utilize a password manager for unique, strong passwords");
         }
@@ -364,33 +399,35 @@ private:
     [[nodiscard]] auto calculate_nist_compliance_score(std::string_view password, 
                                                        const AnalysisResult& result) const noexcept -> std::uint8_t {
         int score{0};
+        const auto password_length = password.length();
         
         // Length scoring (NIST emphasizes length over complexity)
-        if (password.length() >= 8) score += 25;
-        if (password.length() >= 12) score += 20;
-        if (password.length() >= 16) score += 15;
+        score += (password_length >= 8) ? 25 : 0;
+        score += (password_length >= 12) ? 20 : 0;
+        score += (password_length >= 16) ? 15 : 0;
         
-        // Character diversity
-        if (contains_mixed_case(password)) score += 10;
-        if (contains_digits(password)) score += 10;
-        if (contains_special_characters(password)) score += 10;
+        // Character diversity scoring
+        score += contains_mixed_case(password) ? 10 : 0;
+        score += contains_digits(password) ? 10 : 0;
+        score += contains_special_characters(password) ? 10 : 0;
         
         // Security checks using transparent lookup
-        if (!common_passwords_.contains(password)) score += 10;
+        score += (!common_passwords_.contains(password)) ? 10 : 0;
         
-        // Vulnerability penalties
+        // Apply vulnerability penalties
         const auto vulnerability_count = static_cast<int>(result.vulnerabilities.size());
-        score -= vulnerability_count * 3;
+        const auto penalty = vulnerability_count * 3;
+        score -= penalty;
         
         return static_cast<std::uint8_t>(std::clamp(score, 0, 100));
     }
     
     [[nodiscard]] constexpr auto determine_strength_classification(double entropy_bits) const noexcept -> StrengthLevel {
-        const auto threshold_index{std::ranges::find_if(ENTROPY_THRESHOLDS, 
-            [entropy_bits](double threshold) { return entropy_bits < threshold; }) - ENTROPY_THRESHOLDS.begin()};
+        const auto threshold_iterator = std::ranges::find_if(ENTROPY_THRESHOLDS, 
+            [entropy_bits](double threshold) { return entropy_bits < threshold; });
         
-        const auto level_value = std::to_underlying(StrengthLevel{});
-        return static_cast<StrengthLevel>(static_cast<std::uint8_t>(threshold_index + level_value));
+        const auto threshold_index = threshold_iterator - ENTROPY_THRESHOLDS.begin();
+        return static_cast<StrengthLevel>(static_cast<std::uint8_t>(threshold_index));
     }
     
     [[nodiscard]] constexpr auto contains_mixed_case(std::string_view password) const noexcept -> bool {
@@ -445,17 +482,19 @@ auto main() -> int {
     for (const auto& [password, description] : test_cases) {
         const auto result{estimator.analyze_password(password)};
         
-        if (result.has_value()) {
-            std::println("Test: {}", description);
-            std::println("Password: {}", password);
-            std::println("Analysis: {}", result->to_json());
-            const auto years = result->crack_time_seconds / (365.25 * 24 * 3600);
-            std::println("Estimated crack time: {:.2e} seconds ({:.2f} years)", 
-                        result->crack_time_seconds, years);
-            std::println("{}\n", std::string(80, '-'));
-        } else {
+        if (!result.has_value()) {
             std::println("Analysis failed for '{}': {}\n", password, result.error());
+            continue;
         }
+        
+        std::println("Test: {}", description);
+        std::println("Password: {}", password);
+        std::println("Analysis: {}", result->to_json());
+        
+        const auto years = result->crack_time_seconds / (365.25 * 24 * 3600);
+        std::println("Estimated crack time: {:.2e} seconds ({:.2f} years)", 
+                    result->crack_time_seconds, years);
+        std::println("{}\n", std::string(80, '-'));
     }
     
     return 0;
